@@ -1,114 +1,103 @@
 const koa = require('koa')
 const fs = require('fs')
+const Koa_Session = require('koa-session');   // 导入koa-session     
 const router = require('koa-router')()
 const bodyParser = require('koa-bodyparser');
 const static_ = require('koa-static')
 const path = require('path')
 const app = new koa()
-//const server = app.listen(8080)
+const {users} = require('./connection/main.js')
 const server = require('http').createServer(app.callback()).listen(8080)
 const io = require('socket.io').listen(server)
 
+const session_signed_key = ["some secret hurr"];  // 这个是配合signed属性的签名key
+const session_config = {
+    key: 'koa:sess', /**  cookie的key。 (默认是 koa:sess) */
+    maxAge: 24*60*60*1000,   /**  session 过期时间，以毫秒ms为单位计算 。*/
+    autoCommit: true, /** 自动提交到响应头。(默认是 true) */
+    overwrite: true, /** 是否允许重写 。(默认是 true) */
+    httpOnly: true, /** 是否设置HttpOnly，如果在Cookie中设置了"HttpOnly"属性，那么通过程序(JS脚本、Applet等)将无法读取到Cookie信息，这样能有效的防止XSS攻击。  (默认 true) */
+    signed: true, /** 是否签名。(默认是 true) */
+    rolling: false, /** 是否每次响应时刷新Session的有效期。(默认是 false) */
+    renew: false, /** 是否在Session快过期时刷新Session的有效期。(默认是 false) */
+};
+
+const session = Koa_Session(session_config, app)
+app.keys = session_signed_key;
+
+// 使用中间件，注意有先后顺序
+app.use(session);
+
 app.use(bodyParser());
-
-let users = [{
-    username: '小李',
-    socketId: null, 
-    unreadMsg: [],
-    accountNum: '12345',
-    password: '111',
-    contact: [{
-        username: '小王',
-        accountNum: '23456'
-    },{
-        username: '小张',
-        accountNum: '34567'
-    }]
-},{
-    username: '小王',
-    socketId: null,
-    unreadMsg: [],
-    accountNum: '23456',
-    password: '222',
-    contact: [{
-        username: '小李',
-        accountNum: '12345'
-    },{
-        username: '小张',
-        accountNum: '34567'
-    }]
-},{
-    username: '小张',
-    socketId: null,
-    unreadMsg: [],
-    accountNum: '34567',
-    password: '333',
-    contact: [{
-        username: '小李',
-        accountNum: '12345'
-    },{
-        username: '小王',
-        accountNum: '23456'
-    }]
-}]
-
 
 app.use(router.routes())
 
 app.use(static_(path.join(__dirname, '../client/build')))
 
 io.on('connection', function(socket){
-    console.log('有用户加入啦')
     socket.on('login', function(user){
-
-        const login_userIndex = users.findIndex(item => item.accountNum === user.accountNum)
-        socket.emit('render', users[login_userIndex].contact)
-        users.splice(login_userIndex, 1, {...users[login_userIndex], socketId:socket.conn.id})
-
-        socket.on('chat', function(data){
-           const index = users.findIndex(item=>item.accountNum===data)
-           const {socketId} = users[index]
-
-           socket.on('msg', function(msg){
-            socket.emit('msg', {msg})
-            if(socketId !== null){
-                socket.broadcast.to(socketId).emit('msg',{msg,referrer:users[login_userIndex].accountNum})
-            }else{
-
-                users[index].unreadMsg.push({
-                    referrer:users[login_userIndex].accountNum,
-                    msg
-                })
-            }
-           })
+        let me
+        users.findOneAndUpdate({accountNum:user.accountNum},{socketId:socket.conn.id},function(err,res){
+            console.log(socket.conn.id)
+            me=res
         })
-       
+
+        socket.on('logout',function(user){
+            users.findOneAndUpdate({accountNum:user.accountNum},{socketId:''})
+        })
+
+        socket.on('chatConnect',async function(user){
+            console.log(typeof user.toAccountNum)
+            let {socketId} = await users.findOne({accountNum:user.toAccountNum})
+            console.log(socketId)
+
+            socket.on('msg', function(data){
+                //data的数据结构为{referrer:accountNum,msg}
+            const {referrer,msg} = data
+             if(socketId !== ''){
+                 socket.broadcast.to(socketId).emit('msg',{msg,referrer})
+             }else{
+                 users[index].unreadMsg.push({
+                     referrer,
+                     msg
+                 })
+             }
+            })
+        })      
     })
+})
+// 对前端路由BroswerRouter进行处理
+app.use(ctx=>{
+    if(ctx.request.url!=='/'){
+        if(!ctx.session.logged){ //未登录或登录失败
+            console.log(ctx.session.logged)
+            ctx.session.logged = false;
+            ctx.redirect('/')
+        } else {
+            ctx.type = 'text/html; charset=utf-8';
+            ctx.body=fs.createReadStream('../client/build/index.html')
+        }
+    }
 })
 
 router.get('/',async (ctx) => {
     const login_user = ctx.query
     if(JSON.stringify(login_user) !== '{}'){
-        const result = users.find(item => item.accountNum===login_user.accountNum)
-        if(result !== undefined){
-            if(result.password===login_user.password) {
-                ctx.body=`/main?accountNum=${login_user.accountNum}`
-            }else {
-                ctx.body='密码错误'
+        const result = await users.findOne({accountNum:login_user.accountNum})
+        if(result !== null){
+            if(login_user.password===result.password){
+                ctx.body = result
+                ctx.session.logged = true;
+            }else{
+                ctx.body = '密码错误'
             }
         }else{
-            ctx.body = '该用户不存在'
+            ctx.body='该用户不存在'
         }
+       
     }else{
         ctx.type = 'text/html; charset=utf-8';
         ctx.body=fs.createReadStream('../client/build/index.html')
     }
 })
-
-router.get('/main', ctx => {
-    ctx.type = 'text/html; charset=utf-8';
-    ctx.body=fs.createReadStream('../client/build/index.html')
-})
-
-
 
